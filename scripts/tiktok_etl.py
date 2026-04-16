@@ -52,12 +52,10 @@ def get_valid_files(directory):
     return [f for f in os.listdir(directory) if (f.endswith('.xlsx') or f.endswith('.csv') or f.endswith('.xls')) and not f.startswith('~$')]
 
 def extract_shop_label(filename):
-    if 'LPM' in str(filename).upper(): return 'LPM'
-    return 'SUA_CHUA'
+    return 'LPM' if 'LPM' in str(filename).upper() else 'SUA_CHUA'
 
 def normalize_brand(x):
-    if 'LPM' in str(x).upper(): return 'LPM'
-    return 'SUA_CHUA'
+    return 'LPM' if 'LPM' in str(x).upper() else 'SUA_CHUA'
 
 def ext_money(series):
     if series is None: return pd.Series(0)
@@ -95,27 +93,22 @@ def read_file_robust(filepath):
 def ultra_smart_load(filepath):
     df_raw = read_file_robust(filepath)
     if df_raw.empty: return pd.DataFrame()
-        
     best_idx = -1
     for i in range(min(30, len(df_raw))):
         valid_cells = [str(x) for x in df_raw.iloc[i].values if pd.notna(x) and str(x).strip() not in ('', 'nan', 'none')]
         row_str = re.sub(r'\s+', ' ', " ".join(valid_cells).lower())
         if len(valid_cells) >= 3 and any(k in row_str for k in ['order/adjustment id', 'order id', 'mã đơn', 'id đơn', 'settlement', 'thanh toán', 'chi phí', 'thời gian', 'sku', 'phiên live', 'trạng thái', 'product name', 'tên sản phẩm', 'tên chiến dịch', 'tên phiên live']):
-            best_idx = i
-            break
+            best_idx = i; break
     if best_idx == -1: return pd.DataFrame()
-
     header_row = [str(c).strip() for c in df_raw.iloc[best_idx].values]
     data_start_idx = best_idx + 1
     if data_start_idx < len(df_raw):
         row_2_str = re.sub(r'\s+', ' ', " ".join([str(x) for x in df_raw.iloc[data_start_idx].values if pd.notna(x)]).lower())
         if 'platform unique' in row_2_str or 'duy nhất' in row_2_str or 'description' in row_2_str or 'chú thích' in row_2_str or 'định dạng' in row_2_str:
             data_start_idx += 1  
-
     df = df_raw.iloc[data_start_idx:].copy()
     df.columns = header_row
-    df = df.loc[:, ~df.columns.duplicated()]
-    return df.loc[:, ~df.columns.str.contains('^Unnamed|^nan|^None', case=False, na=False)].copy()
+    return df.loc[:, ~df.columns.duplicated() & ~df.columns.str.contains('^Unnamed|^nan|^None', case=False, na=False)].copy()
 
 def get_col(df_cols, keywords):
     for c in df_cols:
@@ -128,12 +121,11 @@ def get_col(df_cols, keywords):
     return None
 
 # =====================================================================
-# PIPELINE CHÍNH & HỆ THỐNG AUDIT LOG
+# PIPELINE CHÍNH & HỆ THỐNG AUDIT LOG (V10)
 # =====================================================================
 def process_pipeline():
-    print(f"\n{'='*60}\n🚀 TIKTOK ETL: V8 - TRUNG TÂM KIỂM SOÁT INPUT (AUDIT LOG)\n{'='*60}")
+    print(f"\n{'='*65}\n🚀 TIKTOK ETL: V10 - CHUẨN HÓA CÔNG THỨC BOOKING & HOA HỒNG\n{'='*65}")
     
-    # 🌟 BỘ LƯU TRỮ TRẠNG THÁI (Dùng để in bảng tổng kết cuối cùng)
     audit_log = {
         "orders": {"files": 0, "status": "Trống", "detail": ""},
         "creator": {"files": 0, "status": "Trống", "detail": ""},
@@ -148,7 +140,6 @@ def process_pipeline():
     master_path = os.path.join(BASE_IN, DIRS['master'])
 
     # --- BƯỚC 0: ĐỌC DỮ LIỆU MASTER ---
-    print("\n[0/7] 📂 ĐANG NẠP DỮ LIỆU MASTER (Giá vốn, Booking)...")
     cost_files = get_valid_files(master_path)
     cost_file = next((f for f in cost_files if 'giá von' in f.lower()), None)
     cost_map = {}
@@ -184,17 +175,13 @@ def process_pipeline():
     order_path = os.path.join(BASE_IN, DIRS['orders'])
     o_files = get_valid_files(order_path)
     audit_log["orders"]["files"] = len(o_files)
-    
     if not o_files:
-        print(f"   ❌ THẤT BẠI: Thư mục 1_orders trống. Dừng chương trình vì thiếu Đơn hàng gốc!")
+        print(f"   ❌ THẤT BẠI: Thư mục 1_orders trống!")
         audit_log["orders"]["status"] = "Lỗi nghiêm trọng"
-        audit_log["orders"]["detail"] = "Không có file đơn hàng nào để tạo bảng base."
         return pd.DataFrame(), [], processed_files, audit_log
 
-    o_file = o_files[0]
-    print(f"   -> Nạp file: {o_file}")
-    df_o = ultra_smart_load(os.path.join(order_path, o_file))
-    processed_files.append((order_path, o_file))
+    df_o = ultra_smart_load(os.path.join(order_path, o_files[0]))
+    processed_files.append((order_path, o_files[0]))
 
     co = {
         'id': get_col(df_o.columns, ['order id', 'mã đơn hàng', 'id đơn hàng', 'mã đơn']),
@@ -208,22 +195,19 @@ def process_pipeline():
         'category': get_col(df_o.columns, ['sku\'s product category', 'product category', 'hạng mục sản phẩm', 'ngành hàng'])
     }
     
-    if not co['id']: 
-        print(f"   ❌ LỖI FILE: Không tìm thấy cột Mã Đơn Hàng trong file {o_file}.")
-        audit_log["orders"]["status"] = "Lỗi định dạng"
-        return pd.DataFrame(), [], processed_files, audit_log
-
     df_o[co['id']] = df_o[co['id']].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
     df_o['qty_num'] = ext_money(df_o[co['qty']]) if co['qty'] else 1.0
     df_o['price_num'] = ext_money(df_o[co['price']]) if co['price'] else 0.0
     df_o['disc_num'] = ext_money(df_o[co['discount']]).abs() if co['discount'] else 0.0
     df_o['cat_clean'] = df_o[co['category']].astype(str).str.strip().str.lower() if co['category'] else ''
     df_o['brand_group'] = df_o['cat_clean'].map(cat_map).fillna('SUA_CHUA').apply(normalize_brand)
+    
+    # 🎯 LUẬT 1: FEE BASE (Doanh số tính Phí Booking)
+    # Công thức: (Giá gốc * Số lượng) - Chiết khấu từ người bán (bỏ qua chiết khấu Sàn)
     df_o['fee_base_item'] = (df_o['price_num'] * df_o['qty_num']) - df_o['disc_num']
     df_o['gmv_item'] = ext_money(df_o[co['gmv']]) if co['gmv'] else 0.0
     
-    if co['sku']:
-        df_o['line_cogs'] = df_o[co['sku']].apply(lambda x: sum(cost_map.get(p.strip().upper(), 7000) for p in str(x).upper().split('+')) if '+' in str(x) else cost_map.get(str(x).strip().upper(), 7000)) * df_o['qty_num']
+    if co['sku']: df_o['line_cogs'] = df_o[co['sku']].apply(lambda x: sum(cost_map.get(p.strip().upper(), 7000) for p in str(x).upper().split('+')) if '+' in str(x) else cost_map.get(str(x).strip().upper(), 7000)) * df_o['qty_num']
     else: df_o['line_cogs'] = 7000 * df_o['qty_num']
 
     agg_dict = {'brand_group': 'first', 'fee_base_item': 'sum', 'gmv_item': 'sum', 'line_cogs': 'sum', 'qty_num': 'sum'}
@@ -235,26 +219,25 @@ def process_pipeline():
     else: fact_df['order_status'] = 'Unknown'
     if co['time']: fact_df['order_date'] = pd.to_datetime(fact_df[co['time']], format='mixed', dayfirst=True, errors='coerce').dt.date
     else: fact_df['order_date'] = None
-    fact_df['is_cancelled'] = fact_df['order_status'].astype(str).str.contains('Hủy|Cancel', case=False, na=False)
+    fact_df['is_cancelled'] = fact_df['order_status'].astype(str).str.contains('Hủy|Cancel|Hoàn', case=False, na=False)
 
-    print(f"   ✅ OK: Ghi nhận {len(fact_df)} đơn hàng duy nhất.")
+    print(f"   ✅ OK: Ghi nhận {len(fact_df)} đơn hàng.")
     audit_log["orders"]["status"] = "Thành công"
-    audit_log["orders"]["detail"] = f"Nạp {len(fact_df)} mã đơn."
+
+    # --- KHỞI TẠO HOA HỒNG ---
+    fact_df['comm_creator'] = 0.0
+    fact_df['comm_partner'] = 0.0
+    fact_df['book_rate'] = 0.0 
 
     # --- BƯỚC 2: AFFILIATE CREATOR ---
-    print("\n[2/7] 🤝 XỬ LÝ INPUT: 2_affiliate_creator...")
-    fact_df['comm_amt'] = 0.0
-    fact_df['book_rate'] = 0.0 
+    print("\n[2/7] 🤝 XỬ LÝ INPUT: 2_affiliate_creator (Lấy Hoa hồng Creator)...")
     creator_path = os.path.join(BASE_IN, DIRS['creator'])
     c_files = get_valid_files(creator_path)
     audit_log["creator"]["files"] = len(c_files)
     
-    if not c_files:
-        print("   ⚠️ Trống: Không có file Affiliate Creator nào.")
-    else:
-        rows_added = 0
+    if c_files:
+        total_creator_comm = 0
         for c_file in c_files:
-            print(f"   -> Nạp file: {c_file}")
             df_c = ultra_smart_load(os.path.join(creator_path, c_file))
             processed_files.append((creator_path, c_file))
             cid = get_col(df_c.columns, ['order id', 'id đơn hàng', 'mã đơn hàng', 'mã đơn'])
@@ -265,11 +248,23 @@ def process_pipeline():
                 c_acc = get_col(df_c.columns, ['tên người dùng nhà sáng tạo', 'creator username', 'tài khoản'])
                 
                 df_c[cid] = df_c[cid].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                
+                # Trích xuất số tiền
                 est_std_val = ext_money(df_c[c_est_std]) if c_est_std else pd.Series(0, index=df_c.index)
                 est_ads_val = ext_money(df_c[c_est_ads]) if c_est_ads else pd.Series(0, index=df_c.index)
-                c_val = est_std_val + est_ads_val
-                df_c['creator_commission_amount'] = np.where(df_c[cst].astype(str).str.contains('Không đủ điều kiện', case=False, na=False), 0, c_val) if cst else c_val
                 
+                # 🎯 LUẬT 2: HOA HỒNG CREATOR
+                # Nếu có Tiêu chuẩn thì lấy Tiêu chuẩn, không thì lấy Quảng cáo
+                c_val = np.where(est_std_val > 0, est_std_val, est_ads_val)
+                
+                # Nếu "Không đủ điều kiện" -> Hoa hồng = 0
+                df_c['creator_commission_amount'] = np.where(
+                    df_c[cst].astype(str).str.contains('Không đủ điều kiện', case=False, na=False),
+                    0, 
+                    c_val
+                )
+                
+                # Map Booking Rate
                 if c_acc:
                     df_c['acc_clean'] = df_c[c_acc].astype(str).str.strip().str.lower()
                     df_c['mapped_book_rate'] = df_c['acc_clean'].map(book_map).fillna(0)
@@ -277,118 +272,96 @@ def process_pipeline():
                 
                 df_c_grouped = df_c.groupby(cid).agg({'creator_commission_amount': 'sum', 'mapped_book_rate': 'first'}).reset_index().rename(columns={cid: 'order_id'})
                 fact_df = fact_df.merge(df_c_grouped, on='order_id', how='left')
-                fact_df['comm_amt'] += fact_df['creator_commission_amount'].fillna(0)
+                fact_df['comm_creator'] += fact_df['creator_commission_amount'].fillna(0)
+                total_creator_comm += fact_df['creator_commission_amount'].sum()
+                
                 fact_df['book_rate'] = np.where(fact_df['mapped_book_rate'].notnull(), fact_df['mapped_book_rate'], fact_df['book_rate'])
                 fact_df.drop(columns=['creator_commission_amount', 'mapped_book_rate'], inplace=True)
-                rows_added += len(df_c_grouped)
-            else:
-                print(f"   ❌ LỖI: File {c_file} không có cột ID.")
-        print(f"   ✅ OK: Ghép nối Hoa hồng Creator cho {rows_added} đơn.")
+                
         audit_log["creator"]["status"] = "Thành công"
-        audit_log["creator"]["detail"] = f"Khớp {rows_added} đơn."
+        print(f"   ✅ OK: Ghi nhận {total_creator_comm:,.0f} đ Hoa hồng Creator.")
 
     # --- BƯỚC 3: AFFILIATE PARTNER ---
-    print("\n[3/7] 🏢 XỬ LÝ INPUT: 3_affiliate_partner...")
+    print("\n[3/7] 🏢 XỬ LÝ INPUT: 3_affiliate_partner (Lấy Hoa hồng Partner)...")
     partner_path = os.path.join(BASE_IN, DIRS['partner'])
     p_files = get_valid_files(partner_path)
     audit_log["partner"]["files"] = len(p_files)
-    if not p_files:
-        print("   ⚠️ Trống: Không có file Affiliate Partner nào.")
-    else:
-        rows_added = 0
+    if p_files:
+        total_partner_comm = 0
         for p_file in p_files:
-            print(f"   -> Nạp file: {p_file}")
             df_p = ultra_smart_load(os.path.join(partner_path, p_file))
             processed_files.append((partner_path, p_file))
             pid = get_col(df_p.columns, ['order id', 'id đơn hàng', 'mã đơn hàng', 'mã đơn'])
             p_act = get_col(df_p.columns, ['hoa hồng thực tế cho đối tác liên kết', 'hoa hồng thực tế'])
             if pid:
                 df_p[pid] = df_p[pid].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                
+                # 🎯 LUẬT 3: HOA HỒNG PARTNER (Lấy chính xác cột thực tế)
                 df_p['partner_commission_amount'] = ext_money(df_p[p_act]) if p_act else pd.Series(0, index=df_p.index)
+                
                 grp = df_p.groupby(pid)['partner_commission_amount'].sum().reset_index().rename(columns={pid: 'order_id'})
                 fact_df = fact_df.merge(grp, on='order_id', how='left')
-                fact_df['comm_amt'] += fact_df['partner_commission_amount'].fillna(0)
+                fact_df['comm_partner'] += fact_df['partner_commission_amount'].fillna(0)
+                total_partner_comm += fact_df['partner_commission_amount'].sum()
                 fact_df.drop(columns=['partner_commission_amount'], inplace=True)
-                rows_added += len(grp)
-        print(f"   ✅ OK: Ghép nối Hoa hồng Partner cho {rows_added} đơn.")
+                
         audit_log["partner"]["status"] = "Thành công"
-        audit_log["partner"]["detail"] = f"Khớp {rows_added} đơn."
+        print(f"   ✅ OK: Ghi nhận {total_partner_comm:,.0f} đ Hoa hồng Partner.")
 
-    # --- BƯỚC 4: SETTLEMENT PAID ---
+    # TỔNG HOA HỒNG AFFILIATE = CREATOR + PARTNER
+    fact_df['comm_amt'] = fact_df['comm_creator'] + fact_df['comm_partner']
+
+    # --- BƯỚC 4 & 5: SETTLEMENT PAID / UNPAID (CHỈ LẤY PAYOUT, KHÔNG LẤY HOA HỒNG NỮA) ---
     print("\n[4/7] 💰 XỬ LÝ INPUT: 4_settlement_paid...")
     fact_df['set_paid'] = 0.0
     paid_path = os.path.join(BASE_IN, DIRS['paid'])
     pd_files = get_valid_files(paid_path)
     audit_log["paid"]["files"] = len(pd_files)
-    if not pd_files:
-        print("   ⚠️ Trống: Không có file Paid nào. Dòng tiền sẽ bị khuyết.")
-    else:
-        total_paid_money = 0
+    if pd_files:
         for pd_file in pd_files:
-            print(f"   -> Nạp file: {pd_file}")
             df_pd = ultra_smart_load(os.path.join(paid_path, pd_file))
             processed_files.append((paid_path, pd_file))
             c_pd_id = get_col(df_pd.columns, ['order/adjustment id', 'mã đơn hàng/điều chỉnh', 'mã đơn hàng', 'order id'])
             c_rel_id = get_col(df_pd.columns, ['related order id', 'id đơn hàng liên quan'])
             pd_val = get_col(df_pd.columns, ['total settlement amount', 'tổng số tiền thanh toán', 'settlement amount', 'số tiền quyết toán'])
             if (c_pd_id or c_rel_id) and pd_val:
-                if c_rel_id and c_pd_id:
-                    df_pd['final_id'] = np.where(df_pd[c_rel_id].notna() & (df_pd[c_rel_id].astype(str).str.strip() != '') & (~df_pd[c_rel_id].astype(str).str.strip().str.lower().isin(['nan', 'none'])), df_pd[c_rel_id], df_pd[c_pd_id])
-                else: df_pd['final_id'] = df_pd[c_rel_id] if c_rel_id else df_pd[c_pd_id]
+                df_pd['final_id'] = np.where(df_pd[c_rel_id].notna() & (df_pd[c_rel_id].astype(str).str.strip() != '') & (~df_pd[c_rel_id].astype(str).str.strip().str.lower().isin(['nan', 'none'])), df_pd[c_rel_id], df_pd[c_pd_id])
                 df_pd['final_id'] = df_pd['final_id'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                
                 grp = df_pd.groupby('final_id')[pd_val].apply(lambda x: ext_money(x).sum()).reset_index().rename(columns={'final_id': 'order_id', pd_val: 'set_paid_val'})
                 fact_df = fact_df.merge(grp, on='order_id', how='left')
-                fact_df['set_paid'] += fact_df['set_paid_val'].fillna(0)
-                total_paid_money += fact_df['set_paid_val'].sum()
-                fact_df.drop(columns=['set_paid_val'], inplace=True)
-            else:
-                print(f"   ❌ LỖI: Không tìm thấy cột ID hoặc Tiền trong file {pd_file}.")
-        print(f"   ✅ OK: Hút được {total_paid_money:,.0f} đ tiền Paid.")
+                fact_df['set_paid'] += fact_df['set_paid_val'].fillna(0); fact_df.drop(columns=['set_paid_val'], inplace=True)
         audit_log["paid"]["status"] = "Thành công"
-        audit_log["paid"]["detail"] = f"{total_paid_money:,.0f} đ"
 
-    # --- BƯỚC 5: SETTLEMENT UNPAID ---
     print("\n[5/7] ⏳ XỬ LÝ INPUT: 5_settlement_unpaid...")
     fact_df['set_unpaid'] = 0.0
     unpaid_path = os.path.join(BASE_IN, DIRS['unpaid'])
     up_files = get_valid_files(unpaid_path)
     audit_log["unpaid"]["files"] = len(up_files)
-    if not up_files:
-        print("   ⚠️ Trống: Không có file Unpaid nào.")
-    else:
-        total_unpaid_money = 0
+    if up_files:
         for up_file in up_files:
-            print(f"   -> Nạp file: {up_file}")
             df_up = ultra_smart_load(os.path.join(unpaid_path, up_file))
             processed_files.append((unpaid_path, up_file))
             c_up_id = get_col(df_up.columns, ['order/adjustment id', 'mã đơn hàng/điều chỉnh', 'order id', 'mã đơn hàng', 'mã đơn'])
             c_rel_up_id = get_col(df_up.columns, ['related order id', 'id đơn hàng liên quan'])
             up_val = get_col(df_up.columns, ['total estimated settlement amount', 'est. settlement amount', 'estimated settlement amount', 'tổng số tiền dự kiến', 'số tiền quyết toán dự kiến', 'ước tính'])
             if (c_up_id or c_rel_up_id) and up_val:
-                if c_rel_up_id and c_up_id:
-                    df_up['final_id'] = np.where(df_up[c_rel_up_id].notna() & (df_up[c_rel_up_id].astype(str).str.strip() != '') & (~df_up[c_rel_up_id].astype(str).str.strip().str.lower().isin(['nan', 'none'])), df_up[c_rel_up_id], df_up[c_up_id])
-                else: df_up['final_id'] = df_up[c_rel_up_id] if c_rel_up_id else df_up[c_up_id]
+                df_up['final_id'] = np.where(df_up[c_rel_up_id].notna() & (df_up[c_rel_up_id].astype(str).str.strip() != '') & (~df_up[c_rel_up_id].astype(str).str.strip().str.lower().isin(['nan', 'none'])), df_up[c_rel_up_id], df_up[c_up_id])
                 df_up['final_id'] = df_up['final_id'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                
                 grp = df_up.groupby('final_id')[up_val].apply(lambda x: ext_money(x).sum()).reset_index().rename(columns={'final_id': 'order_id', up_val: 'set_unpaid_val'})
                 fact_df = fact_df.merge(grp, on='order_id', how='left')
-                fact_df['set_unpaid'] += fact_df['set_unpaid_val'].fillna(0)
-                total_unpaid_money += fact_df['set_unpaid_val'].sum()
-                fact_df.drop(columns=['set_unpaid_val'], inplace=True)
-            else:
-                print(f"   ❌ LỖI: Không tìm thấy cột ID/Tiền trong {up_file}.")
-        print(f"   ✅ OK: Ghi nhận {total_unpaid_money:,.0f} đ tiền Unpaid (Treo).")
+                fact_df['set_unpaid'] += fact_df['set_unpaid_val'].fillna(0); fact_df.drop(columns=['set_unpaid_val'], inplace=True)
         audit_log["unpaid"]["status"] = "Thành công"
-        audit_log["unpaid"]["detail"] = f"{total_unpaid_money:,.0f} đ"
 
-    # --- TÍNH TOÁN PHÍ (NỘI BỘ MÁY TÍNH) ---
+    # --- TÍNH TOÁN CÁC CHI PHÍ THEO LUẬT MỚI NHẤT ---
     def calc_fees(r):
         is_lpm = (r['brand_group'] == 'LPM')
         rate_fixed = 0.158 if is_lpm else 0.1031
         rate_pack = 2000 if is_lpm else 3000
         standard_pack_cost = r['qty_num'] * rate_pack
+        
+        # 🎯 LUẬT 4: PHÍ BOOKING CÓ MẶT BẤT CHẤP HỦY ĐƠN
         f_book = r['fee_base_item'] * r['book_rate']
+        
         f_fix = r['fee_base_item'] * rate_fixed
         f_pay = r['fee_base_item'] * 0.05
         f_vxp = r['fee_base_item'] * 0.03
@@ -398,7 +371,12 @@ def process_pipeline():
         
         estimated_payout = r['fee_base_item'] - (f_fix + f_pay + f_vxp + f_infra + r['comm_amt'])
         
-        if r['is_cancelled']: return pd.Series([0, 0, 0, 0, 30000, f_pack, 0, 0, f_book, 0])
+        # NẾU ĐƠN BỊ HỦY / HOÀN TRẢ
+        if r['is_cancelled']: 
+            # Thứ tự return: fix, pay, vxp, infra, return_fee, pack, cogs, bo, book, payout
+            # 🌟 Cột cuối cùng thứ 9 (index 8) là f_book > 0đ (Kế toán vẫn ghi nợ trả KOC)
+            return pd.Series([0, 0, 0, 0, 30000, f_pack, 0, 0, f_book, 0])
+            
         if r['set_paid'] != 0: tien_nhan_lai = r['set_paid']
         elif r['set_unpaid'] != 0: tien_nhan_lai = r['set_unpaid']
         else: tien_nhan_lai = estimated_payout
@@ -410,29 +388,20 @@ def process_pipeline():
 
     # --- BƯỚC 6 & 7: QUẢNG CÁO ADS PROD VÀ ADS LIVE ---
     ads_master_dict = {} 
-    
     for idx, d_name in enumerate(['ads_prod', 'ads_live']):
         step_num = 6 + idx
         folder_label = "6_ads_product" if d_name == 'ads_prod' else "7_ads_live"
         print(f"\n[{step_num}/7] 📈 XỬ LÝ INPUT: {folder_label}...")
-        
         a_path = os.path.join(BASE_IN, DIRS[d_name])
         a_files = get_valid_files(a_path)
         audit_log[d_name]["files"] = len(a_files)
-        
-        if not a_files:
-            print(f"   ⚠️ Trống: Không có file {folder_label} nào.")
-            continue
+        if not a_files: continue
             
         total_folder_ads = 0
         for a_f in a_files:
-            print(f"   -> Đang soi: {a_f}")
             ads_shop = extract_shop_label(a_f)
-            
             date_match = re.search(r'(\d{4}[-_]\d{1,2}[-_]\d{1,2})', a_f)
-            if not date_match: 
-                print(f"      ⚠️ BỎ QUA: Không tìm thấy ngày YYYY-MM-DD trong tên file.")
-                continue
+            if not date_match: continue
             
             file_date = pd.to_datetime(date_match.group(1).replace('_', '-')).date()
             df_a = ultra_smart_load(os.path.join(a_path, a_f))
@@ -441,49 +410,37 @@ def process_pipeline():
             
             total_file_cost = 0
             target_col = None
-            
-            # TẦNG 1: Tìm theo tên cột
             for c in df_a.columns:
-                if str(c).strip().lower() in ['chi phí', 'cost']:
-                    target_col = c; break
+                if str(c).strip().lower() in ['chi phí', 'cost']: target_col = c; break
             if not target_col:
                 for c in df_a.columns:
                     c_clean = str(c).lower()
                     if ('chi phí' in c_clean or 'cost' in c_clean) and not any(x in c_clean for x in ['cpc', 'cpm', 'tỷ lệ', 'ròng', 'per', 'mỗi', 'hoàn', 'đơn hàng']):
                         target_col = c; break
             
-            if target_col:
-                total_file_cost = ext_money(df_a[target_col]).sum() * 1.10
+            if target_col: total_file_cost = ext_money(df_a[target_col]).sum() * 1.10
             else:
-                # TẦNG 2: Ép Vị trí RAW
                 df_raw = read_file_robust(os.path.join(a_path, a_f))
                 target_idx = 10 if d_name == 'ads_prod' else 5
                 if not df_raw.empty and target_idx < len(df_raw.columns):
-                    vals = df_raw.iloc[1:, target_idx]
-                    total_file_cost = ext_money(vals).sum() * 1.10
+                    total_file_cost = ext_money(df_raw.iloc[1:, target_idx]).sum() * 1.10
             
             if total_file_cost > 0:
                 key = (file_date, ads_shop)
                 if key in ads_master_dict: ads_master_dict[key] += total_file_cost
                 else: ads_master_dict[key] = total_file_cost
                 total_folder_ads += total_file_cost
-                print(f"      ✅ Ghi nhận: {total_file_cost:,.0f} đ")
-            else:
-                print(f"      ❌ Thất bại: Cột tiền trống hoặc sai cấu trúc.")
                 
-        print(f"   ✅ TỔNG KẾT {folder_label}: Nạp {total_folder_ads:,.0f} đ.")
         audit_log[d_name]["status"] = "Thành công"
         audit_log[d_name]["detail"] = f"{total_folder_ads:,.0f} đ"
 
     ads_data = [(d, CHANNEL_TIKTOK_ID, s, float(cost)) for (d, s), cost in ads_master_dict.items()]
     
-    # 🎯 IN BẢNG TỔNG KẾT RA MÀN HÌNH TERMINAL 🎯
     print("\n============================================================")
     print("📊 BẢNG TỔNG KẾT TRẠNG THÁI KIỂM TOÁN (AUDIT REPORT)")
     print("============================================================")
     for folder, data in audit_log.items():
         icon = "✅" if data["status"] == "Thành công" else "⚠️" if data["status"] == "Trống" else "❌"
-        # Canh lề đẹp mắt cho Terminal
         folder_pad = folder.ljust(12)
         files_str = f"({data['files']} file)".ljust(10)
         print(f"{icon} {folder_pad} | {files_str} | {data['status'].ljust(12)} | {data['detail']}")
@@ -494,9 +451,7 @@ def process_pipeline():
 def load_to_db(fact_df, ads_data):
     conn = psycopg2.connect(**DB_CONFIG); cur = conn.cursor()
     try:
-        if fact_df.empty:
-            print("⚠️ BỎ QUA NẠP DB: Không có dữ liệu đơn hàng mới.")
-        else:
+        if not fact_df.empty:
             vals = []
             for _, r in fact_df.iterrows():
                 if not str(r['order_id']).strip() or str(r['order_id']) == 'nan': continue
@@ -539,12 +494,8 @@ if __name__ == "__main__":
     init_db()  
     fact_data, ads_data, processed_files, _ = process_pipeline()
     load_to_db(fact_data, ads_data)
-    
-    # Move processed files
     for path, f in processed_files:
         dest_folder = os.path.join(BASE_OUT, os.path.basename(os.path.normpath(path)))
         os.makedirs(dest_folder, exist_ok=True)
-        try:
-            shutil.move(os.path.join(path, f), os.path.join(dest_folder, f))
-        except Exception as e:
-            print(f"⚠️ Lỗi khi di chuyển file {f}: {e}")
+        try: shutil.move(os.path.join(path, f), os.path.join(dest_folder, f))
+        except: pass
